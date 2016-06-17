@@ -661,6 +661,78 @@ class Observer(object):
                         np.cos(LST.radian - target.ra.radian))
         return alt
 
+    def _rise_set_trig(self, time, target, prev_next, rise_set):
+        """
+        Crude time at next rise/set of ``target`` using spherical trig.
+
+        This method is ~15 times faster than `_calcriseset`,
+        and inherently does *not* take the atmosphere into account.
+
+        The time returned should not be used in calculations; the purpose
+        of this routine is to supply a guess to `_calcriseset`.
+
+        Parameters
+        ----------
+        time : `~astropy.time.Time` or other (see below)
+            Time of observation. This will be passed in as the first argument to
+            the `~astropy.time.Time` initializer, so it can be anything that
+            `~astropy.time.Time` will accept (including a `~astropy.time.Time`
+            object)
+
+        target : `~astropy.coordinates.SkyCoord`
+            Position of target or multiple positions of that target
+            at multiple times (if target moves, like the Sun)
+
+        prev_next : str - either 'previous' or 'next'
+            Test next rise/set or previous rise/set
+
+        rise_set : str - either 'rising' or 'setting'
+            Compute prev/next rise or prev/next set
+
+        Returns
+        -------
+        ret1 : `~astropy.time.Time`
+            Time of rise/set
+        """
+        target_is_vector = _target_is_vector(target)
+        if target_is_vector:
+            cosHA = u.Quantity(
+                [-np.tan(t.dec)*np.tan(self.location.latitude.radian)
+                 for t in target]
+            )
+        else:
+            cosHA = -np.tan(target.dec)*np.tan(self.location.latitude.radian)
+        # find the absolute value of the hour Angle
+        HA = Longitude(np.fabs(np.arccos(cosHA)))
+        # if rise, HA is -ve and vice versa
+        if rise_set == 'rising':
+            HA = -HA
+        # LST = HA + RA
+        if target_is_vector:
+            LST = HA + Longitude([t.ra for t in target])
+        else:
+            LST = HA + target.ra
+
+        # now we need to figure out time to return from LST
+        raSun = get_sun(time).ra
+        solarTime = LST - raSun + 12*u.hourangle - self.location.longitude
+
+        # assume this is on the same day as supplied time, and fix later
+        first_guess = Time(
+            u.d*int(time.mjd) + u.hour*solarTime.wrap_at('360d').hour,
+            format='mjd'
+            )
+
+        if prev_next == 'next':
+            # if 'next', we want time to be greater than given time
+            mask = first_guess < time
+            rise_set_time = first_guess + mask * u.sday
+        else:
+            # if 'previous', we want time to be less than given time
+            mask = first_guess > time
+            rise_set_time = first_guess - mask * u.sday
+        return rise_set_time
+
     def _calc_riseset(self, time, target, prev_next, rise_set, horizon, N=150):
         """
         Time at next rise/set of ``target``.
