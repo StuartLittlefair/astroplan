@@ -8,7 +8,7 @@ import warnings
 
 # Third-party
 from astropy.coordinates import (EarthLocation, SkyCoord, AltAz, get_sun,
-                                 get_moon, Angle, Latitude, Longitude,
+                                 get_moon ,Angle, Latitude, Longitude, ICRS,
                                  UnitSphericalRepresentation)
 from astropy.extern.six import string_types
 import astropy.units as u
@@ -696,12 +696,14 @@ class Observer(object):
         """
         target_is_vector = _target_is_vector(target)
         if target_is_vector:
-            cosHA = u.Quantity(
-                [-np.tan(t.dec)*np.tan(self.location.latitude.radian)
-                 for t in target]
-            )
+            icrs_frame = ICRS()
+            decs = Latitude([t.coord.transform_to(icrs_frame).dec
+                             if not t.coord.is_equivalent_frame(icrs_frame) else
+                             t.dec for t in target])
+            cosHA = u.Quantity(-np.tan(decs)*np.tan(self.location.latitude.radian))
         else:
-            cosHA = -np.tan(target.dec)*np.tan(self.location.latitude.radian)
+            dec = target.coord.transform_to(ICRS).dec
+            cosHA = -np.tan(dec)*np.tan(self.location.latitude.radian)
         # find the absolute value of the hour Angle
         HA = Longitude(np.fabs(np.arccos(cosHA)))
         # if rise, HA is -ve and vice versa
