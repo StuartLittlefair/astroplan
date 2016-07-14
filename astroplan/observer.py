@@ -9,11 +9,15 @@ import warnings
 # Third-party
 from astropy.coordinates import (EarthLocation, SkyCoord, AltAz, get_sun,
                                  get_moon ,Angle, Latitude, Longitude, ICRS,
+from astropy.coordinates import (EarthLocation, SkyCoord, AltAz, get_sun, get_body,
+                                 Angle, Latitude, Longitude, ICRS, get_moon
+                                 PrecessedGeocentric,
                                  UnitSphericalRepresentation)
 from astropy.extern.six import string_types
 import astropy.units as u
 from astropy.time import Time
 import numpy as np
+from numpy.polynomial.polynomial import polyval
 import pytz
 
 # Package
@@ -661,6 +665,85 @@ class Observer(object):
                         np.cos(LST.radian - target.ra.radian))
         return alt
 
+
+    def _equation_of_time(self, time):
+        """
+        Find the difference between apparent and mean solar time
+
+        Parameters
+        ----------
+        time : `~astropy.time.Time`
+            times (array)
+
+        Returns
+        ----------
+        ret1 : `~astropy.units.Quantity`
+            the equation of time
+        """
+
+        # Julian centuries since J2000.0
+        T = (time - Time("J2000")).to(u.year).value / 100
+
+        # obliquity of ecliptic (Meeus 1998, eq 22.2)
+        poly_pars = (84381.448, 46.8150, 0.00059, 0.001813)
+        eps = u.Quantity(polyval(T, poly_pars), u.arcsec)
+        y = np.tan(eps/2)**2
+
+        # Sun's mean longitude (Meeus 1998, eq 25.2)
+        poly_pars = (280.46646, 36000.76983, 0.0003032)
+        L0 = u.Quantity(polyval(T, poly_pars), u.deg)
+
+        # Sun's mean anomaly (Meeus 1998, eq 25.3)
+        poly_pars = (357.52911, 35999.05029, 0.0001537)
+        M = u.Quantity(polyval(T, poly_pars), u.deg)
+
+        # eccentricity of Earth's orbit (Meeus 1998, eq 25.4)
+        poly_pars = (0.016708634, -0.000042037, -0.0000001267)
+        e = polyval(T, poly_pars)
+
+        # equation of time, radians (Meeus 1998, eq 28.3)
+        eot = (y * np.sin(2*L0) - 2*e*np.sin(M) + 4*e*y*np.sin(M)*np.cos(2*L0) -
+               0.5*y**2 * np.sin(4*L0) - 5*e**2 * np.sin(2*M)/4) * u.rad
+        return eot.to(u.hourangle)
+
+    def _astropy_time_from_LST(self, time, LST, prev_next):
+        """
+        Convert a Local Sidereal Time to an astropy Time object.
+
+        The local time is related to the LST through the RA of the Sun.
+        This routine uses this relationship to convert a LST to an astropy
+        time object.
+
+        Returns
+        -------
+        ret1 : `~astropy.time.Time`
+            time corresponding to LST
+        """
+        # now we need to figure out time to return from LST
+        raSun = get_sun(time).ra
+        # calculate Greenwich Apparent Solar Time, which we will use as ~UTC for now
+        solarTime = LST - raSun + 12*u.hourangle - self.location.longitude
+
+        # assume this is on the same day as supplied time, and fix later
+        first_guess = Time(
+            u.d*int(time.mjd) + u.hour*solarTime.wrap_at('360d').hour,
+            format='mjd'
+        )
+
+        # Equation of time is difference between GAST and UTC
+        eot = self._equation_of_time(first_guess)
+        first_guess = first_guess - u.hour * eot.value
+
+        if prev_next == 'next':
+            # if 'next', we want time to be greater than given time
+            mask = first_guess < time
+            rise_set_time = first_guess + mask * u.sday
+        else:
+            # if 'previous', we want time to be less than given time
+            mask = first_guess > time
+            rise_set_time = first_guess - mask * u.sday
+        return rise_set_time
+
     def _rise_set_trig(self, time, target, prev_next, rise_set):
         """
         Crude time at next rise/set of ``target`` using spherical trig.
@@ -697,12 +780,14 @@ class Observer(object):
         target_is_vector = _target_is_vector(target)
         if target_is_vector:
             icrs_frame = ICRS()
-            decs = Latitude([t.coord.transform_to(icrs_frame).dec
-                             if not t.coord.is_equivalent_frame(icrs_frame) else
-                             t.dec for t in target])
+            coords = SkyCoord([getattr(t, 'coord', t) for t in target])
+            if not coords.is_equivalent_frame(icrs_frame):
+                coords = coords.transform_to(icrs_frame)
+            decs = coords.dec
             cosHA = u.Quantity(-np.tan(decs)*np.tan(self.location.latitude.radian))
         else:
-            dec = target.coord.transform_to(ICRS).dec
+            coord = getattr(target, 'coord', target)
+            dec = coord.transform_to(ICRS).dec
             cosHA = -np.tan(dec)*np.tan(self.location.latitude.radian)
         # find the absolute value of the hour Angle
         HA = Longitude(np.fabs(np.arccos(cosHA)))
@@ -715,25 +800,7 @@ class Observer(object):
         else:
             LST = HA + target.ra
 
-        # now we need to figure out time to return from LST
-        raSun = get_sun(time).ra
-        solarTime = LST - raSun + 12*u.hourangle - self.location.longitude
-
-        # assume this is on the same day as supplied time, and fix later
-        first_guess = Time(
-            u.d*int(time.mjd) + u.hour*solarTime.wrap_at('360d').hour,
-            format='mjd'
-            )
-
-        if prev_next == 'next':
-            # if 'next', we want time to be greater than given time
-            mask = first_guess < time
-            rise_set_time = first_guess + mask * u.sday
-        else:
-            # if 'previous', we want time to be less than given time
-            mask = first_guess > time
-            rise_set_time = first_guess - mask * u.sday
-        return rise_set_time
+        return self._astropy_time_from_LST(time, LST, prev_next)
 
     def _calc_riseset(self, time, target, prev_next, rise_set, horizon, N=150):
         """
@@ -801,6 +868,68 @@ class Observer(object):
                                                 horizon=horizon)
                          for time_limit, altitude_limit in
                          zip(time_limits, altitude_limits)])
+
+    def _calc_transit_from_lst(self, time, target, prev_next, antitransit=False):
+        """
+        Time at next transit of the meridian of `target`.
+
+        Uses an alternative method based on LST and RA. This is around 30x faster
+        than the exact method, but actually calculates the transit time for an Observer
+        at the geocenter, so is out by several minutes. It should be used as a first
+        guess, or a crude approximation.
+
+        Parameters
+        ----------
+        time : `~astropy.time.Time` or other (see below)
+            Time of observation. This will be passed in as the first argument to
+            the `~astropy.time.Time` initializer, so it can be anything that
+            `~astropy.time.Time` will accept (including a `~astropy.time.Time`
+            object)
+
+        target : `~astropy.coordinates.SkyCoord`
+            Position of target or multiple positions of that target
+            at multiple times (if target moves, like the Sun)
+
+        prev_next : str - either 'previous' or 'next'
+            Test next rise/set or previous rise/set
+
+        antitransit : bool
+            Toggle compute antitransit (below horizon, equivalent to midnight
+            for the Sun)
+
+        location : `~astropy.coordinates.EarthLocation`
+            Location of observer
+
+        N : int
+            Number of altitudes to compute when searching for
+            rise or set.
+
+        Returns
+        -------
+        ret1 : `~astropy.time.Time`
+            Time of transit/antitransit
+        """
+        if not isinstance(time, Time):
+            time = Time(time)
+
+        target_is_vector = _target_is_vector(target)
+
+        # get frame so we can convert RA, Dec of target to Geocentric
+        # coordinates precessed to the mean equinox of date
+        frame = PrecessedGeocentric(obstime=time)
+        if target_is_vector:
+            skycoo = SkyCoord([getattr(t, 'coord', t) for t in target])
+        else:
+            skycoo = getattr(target, 'coord', target)
+        skycoo = skycoo.transform_to(frame)
+
+        # now at transit, HA = LST-RA = 0
+        # at antitransit, HA = LST-RA = 12
+        LST = skycoo.ra.hourangle * u.hourangle
+        if antitransit:
+            LST += 12*u.hourangle
+        LST = Longitude(LST)
+        return self._astropy_time_from_LST(time, LST, prev_next)
 
     def _calc_transit(self, time, target, prev_next, antitransit=False, N=150):
         """
