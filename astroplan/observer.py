@@ -638,16 +638,20 @@ class Observer(object):
             return Time(times[1].jd - ((altitudes[1] - horizon)/slope).value,
                         format='jd')
 
-    def _altitude_trig(self, LST, target):
+    def _altaz_trig(self, time, target):
         """
-        Calculate the altitude of ``target`` at local sidereal times ``LST``.
+        Calculate the altitude and azimuth of ``target`` at local sidereal times ``LST``.
 
         This method provides a factor of ~3 speed up over calling `altaz`, and
         inherently does *not* take the atmosphere into account.
 
+        Crude assumptions are made: coordinates are in ICRS frame, and distance to targets is
+        large (i.e parallax from barycentre is small and there is no need to correct
+        to a GCRS frame).
+
         Parameters
         ----------
-        LST : `~astropy.time.Time`
+        time : `~astropy.time.Time`
             Local sidereal times (array)
 
         target : {`~astropy.coordinates.SkyCoord`, `FixedTarget`} or similar
@@ -657,14 +661,26 @@ class Observer(object):
         -------
         alt : `~astropy.unit.Quantity`
             Array of altitudes
+        az : `~astropy.unit.Quantity`
+            Array of azimuths
         """
-        alt = np.arcsin(np.sin(self.location.latitude.radian) *
+        LST = self.local_sidereal_time(time)
+        HA = LST - target.ra
+        alt = np.arcsin(np.sin(self.location.latitude) *
                         np.sin(target.dec) +
-                        np.cos(self.location.latitude.radian) *
+                        np.cos(self.location.latitude) *
                         np.cos(target.dec) *
-                        np.cos(LST.radian - target.ra.radian))
-        return alt
-
+                        np.cos(HA))
+        az = np.arccos((np.sin(target.dec) - np.sin(self.location.latitude) * np.sin(alt)) /
+                       (np.cos(self.location.latitude) * np.cos(alt)))
+        # deal with azimuth ambiguity. HA < 0 means 0 < az < 180
+        mask = HA.wrap_at(12*u.hourangle).value > 0
+        try:
+            az[mask] = 2 * np.pi * u.radian - az[mask]
+        except:
+            if mask:
+                az = 2 * np.pi * u.radian - az
+        return Latitude(alt), Longitude(az)
 
     def _equation_of_time(self, time):
         """
