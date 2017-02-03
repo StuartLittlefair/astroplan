@@ -359,7 +359,7 @@ class Observer(object):
                 return False
         return True
 
-    def _preprocess_inputs(self, time, target, grid=False):
+    def _preprocess_inputs(self, time, target=None, grid=False):
         """
         Preprocess time and target inputs
 
