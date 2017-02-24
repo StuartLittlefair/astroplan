@@ -692,8 +692,10 @@ class PriorityScheduler(Scheduler):
             # TODO: make it so that this isn't required to prevent errors in slot creation
             total_duration = b.duration + buffer_time
             # calculate the number of time slots needed for this exposure
-            _stride_by = np.int(np.ceil(float(total_duration / time_resolution)))
-
+            # NOTE - this is a flaw? since this step means the constraints must
+            # be valid during observation AND during transition.
+            # have changed from total_duration to b.duration
+            _stride_by = np.int(np.ceil(float(b.duration / time_resolution)))
             # Stride the score arrays by that number
             _strided_scores = stride_array(constraint_scores, _stride_by)
 
