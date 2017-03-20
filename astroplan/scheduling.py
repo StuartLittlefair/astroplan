@@ -856,7 +856,8 @@ class Transitioner(object):
                 targets = get_skycoord([oldblock.target, newblock.target])
                 aaz = _get_altaz(start_time, observer, targets)['altaz']
                 sep = aaz[0].separation(aaz[1])
-                components['slew_time'] = sep / self.slew_rate
+                if sep/self.slew_rate > 1 * u.second:
+                    components['slew_time'] = sep / self.slew_rate
 
         if self.instrument_reconfig_times is not None:
             components.update(self.compute_instrument_transitions(oldblock, newblock))
